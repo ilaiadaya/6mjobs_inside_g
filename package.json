@@ -1,0 +1,12 @@
+{
+  "name": "fantastic-job-sync",
+  "version": "1.0.0",
+  "main": "sync.js",
+  "scripts": {
+    "start": "node sync.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.55.0",
+    "node-fetch": "^2.6.7"
+  }
+}
