@@ -12,17 +12,11 @@ const JOB_KEY         = process.env.JOB_KEY || '6m_backfill';
 const START_CURSOR    = process.env.START_CURSOR ? Number(process.env.START_CURSOR) : undefined;
 /* ------------------------------------------------------------------------- */
 
-// Cloud SQL over Unix socket
-const INSTANCE = process.env.INSTANCE_CONNECTION_NAME; // "project:region:instance"
-if (!INSTANCE) throw new Error('Missing INSTANCE_CONNECTION_NAME');
-const DB_SOCKET_PATH = `/cloudsql/${INSTANCE}`;
-
-
 // no INSTANCE or host in code:
 const pool = new Pool({
   statement_timeout: 30000,
   query_timeout: 30000,
-  max: 10
+  max: 10,
 });
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
