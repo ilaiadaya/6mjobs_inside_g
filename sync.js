@@ -41,14 +41,60 @@ function nz(x) { return x === undefined ? null : x; }
 function asJsonbArray(x, fallback = []) {
   if (x == null) return fallback;
   if (Array.isArray(x)) return x;
+
   if (typeof x === 'string') {
     const s = x.trim();
     if (!s) return fallback;
+
+    // 1) If it's already valid JSON, parse and normalize to array
     try {
       const v = JSON.parse(s);
       return Array.isArray(v) ? v : [v];
-    } catch { return [s]; }
+    } catch { /* not valid JSON */ }
+
+    // 2) Handle Postgres array-literal style: {a,b,"c,d"}
+    if (s.startsWith('{') && s.endsWith('}')) {
+      const inner = s.slice(1, -1);
+      // Split on commas not inside quotes
+      const parts = [];
+      let cur = '';
+      let inQuotes = false;
+      for (let i = 0; i < inner.length; i++) {
+        const ch = inner[i];
+        if (ch === '"') {
+          // toggle quotes unless escaped
+          const prev = inner[i - 1];
+          if (prev !== '\\') inQuotes = !inQuotes;
+          cur += ch;
+          continue;
+        }
+        if (ch === ',' && !inQuotes) {
+          parts.push(cur.trim());
+          cur = '';
+        } else {
+          cur += ch;
+        }
+      }
+      if (cur.length) parts.push(cur.trim());
+
+      // Unquote items like "Kihei, Hawaii" -> Kihei, Hawaii
+      return parts
+        .map(p => {
+          if (p === 'NULL' || p === 'null') return null;
+          if (p.startsWith('"') && p.endsWith('"')) {
+            // unescape \" and \\ inside
+            try { return JSON.parse(p); } catch { return p.slice(1, -1); }
+          }
+          return p;
+        })
+        .filter(v => v !== undefined);
+    }
+
+    // 3) Fallback: single string as single-item array
+    return [s];
   }
+
+  // numbers/booleans/objects -> wrap
   return [x];
 }
 
