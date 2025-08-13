@@ -38,6 +38,33 @@ async function withExpoRetry(fn, label, maxRetries = 3, startDelay = 500) {
 /* -------------------------- JSONB safety helpers ------------------------- */
 function nz(x) { return x === undefined ? null : x; }
 
+function parsePgArrayLiteral(s) {
+  // s like: {a,b,"c,d",NULL}
+  const inner = s.slice(1, -1); // remove outer {}
+  const out = [];
+  let cur = '';
+  let inQuotes = false;
+  let esc = false;
+  for (let i = 0; i < inner.length; i++) {
+    const ch = inner[i];
+    if (esc) { cur += ch; esc = false; continue; }
+    if (ch === '\\') { cur += ch; esc = true; continue; }
+    if (ch === '"') { inQuotes = !inQuotes; cur += ch; continue; }
+    if (ch === ',' && !inQuotes) { out.push(cur.trim()); cur = ''; continue; }
+    cur += ch;
+  }
+  if (cur.length) out.push(cur.trim());
+
+  return out.map(p => {
+    if (p === '' || p.toUpperCase() === 'NULL') return null;
+    if (p.startsWith('"') && p.endsWith('"')) {
+      // unquote via JSON.parse to handle escapes correctly
+      try { return JSON.parse(p); } catch { return p.slice(1, -1); }
+    }
+    return p;
+  });
+}
+
 function asJsonbArray(x, fallback = []) {
   if (x == null) return fallback;
   if (Array.isArray(x)) return x;
@@ -46,57 +73,39 @@ function asJsonbArray(x, fallback = []) {
     const s = x.trim();
     if (!s) return fallback;
 
-    // 1) If it's already valid JSON, parse and normalize to array
+    // Already valid JSON?
     try {
       const v = JSON.parse(s);
       return Array.isArray(v) ? v : [v];
-    } catch { /* not valid JSON */ }
+    } catch { /* not JSON string */ }
 
-    // 2) Handle Postgres array-literal style: {a,b,"c,d"}
+    // Postgres array-literal?  { ... }
     if (s.startsWith('{') && s.endsWith('}')) {
-      const inner = s.slice(1, -1);
-      // Split on commas not inside quotes
-      const parts = [];
-      let cur = '';
-      let inQuotes = false;
-      for (let i = 0; i < inner.length; i++) {
-        const ch = inner[i];
-        if (ch === '"') {
-          // toggle quotes unless escaped
-          const prev = inner[i - 1];
-          if (prev !== '\\') inQuotes = !inQuotes;
-          cur += ch;
-          continue;
-        }
-        if (ch === ',' && !inQuotes) {
-          parts.push(cur.trim());
-          cur = '';
-        } else {
-          cur += ch;
-        }
-      }
-      if (cur.length) parts.push(cur.trim());
-
-      // Unquote items like "Kihei, Hawaii" -> Kihei, Hawaii
-      return parts
-        .map(p => {
-          if (p === 'NULL' || p === 'null') return null;
-          if (p.startsWith('"') && p.endsWith('"')) {
-            // unescape \" and \\ inside
-            try { return JSON.parse(p); } catch { return p.slice(1, -1); }
-          }
-          return p;
-        })
-        .filter(v => v !== undefined);
+      return parsePgArrayLiteral(s);
     }
 
-    // 3) Fallback: single string as single-item array
+    // Fallback: single string → [string]
     return [s];
   }
 
   // numbers/booleans/objects -> wrap
   return [x];
 }
+
+function asJsonbObject(x, fallback = {}) {
+  if (x == null) return fallback;
+  if (typeof x === 'object' && !Array.isArray(x)) return x;
+  if (typeof x === 'string') {
+    const s = x.trim();
+    if (!s) return fallback;
+    try {
+      const v = JSON.parse(s);
+      return (v && typeof v === 'object' && !Array.isArray(v)) ? v : { value: v };
+    } catch { return { value: s }; }
+  }
+  return { value: x };
+}
+
 
 function asJsonbObject(x, fallback = {}) {
   if (x == null) return fallback;
@@ -312,6 +321,32 @@ async function saveCursor(client, cursor) {
 async function upsertBatch(client, rows) {
   if (!rows.length) return;
 
+    const jsonbArrayFields = [
+    'locations_alt_raw','locations_derived','employment_type',
+    'cities_derived','regions_derived','countries_derived',
+    'timezones_derived','lats_derived','lngs_derived'
+  ];
+
+  for (const r of rows) {
+    for (const f of jsonbArrayFields) {
+      r[f] = asJsonbArray(r[f]);   // <- guarantees proper JSON arrays
+    }
+    r.li_payload = asJsonbObject(r.li_payload); // <- guarantees proper JSON object
+    r.ai_payload = asJsonbObject(r.ai_payload);
+  }
+
+  // (optional but helpful) preflight to pinpoint bad shapes early
+  for (const r of rows) {
+    try {
+      jsonbArrayFields.forEach(f => JSON.stringify(r[f]));
+      JSON.stringify(r.li_payload);
+      JSON.stringify(r.ai_payload);
+    } catch (e) {
+      console.error('🚨 malformed jsonb before insert for id=', r.id, e.message);
+      throw e;
+    }
+  }
+  
   const cols = [
     'id','title','organization','organization_url','organization_logo',
     'date_posted','date_created','date_validthrough',
